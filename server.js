@@ -1,21 +1,58 @@
+// ============================================
+// This is the "robot" that does the real work.
+// It runs on YOUR computer, not in the browser,
+// because YouTube only talks to real servers,
+// not directly to a webpage.
+//
+// Under the hood it drives yt-dlp, a tool kept
+// up to date by a huge community — so when
+// YouTube changes something, this keeps working
+// much more reliably than older libraries did.
+// ============================================
+
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const play = require("play-dl");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
 const ffmpegPath = require("ffmpeg-static");
+const { YtDlp, helpers } = require("ytdlp-nodejs");
 
+const execFileAsync = promisify(execFile);
 const app = express();
 const PORT = process.env.PORT || 3000;
+const ytdlp = new YtDlp();
 const DOWNLOAD_DIR = path.join(__dirname, "downloads");
 
 if (!fs.existsSync(DOWNLOAD_DIR)) {
   fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 }
 
+// Serve everything inside the "public" folder (our webpage)
 app.use(express.static(path.join(__dirname, "public")));
 
 function isYoutubeUrl(url) {
   return typeof url === "string" && /youtube\.com|youtu\.be/.test(url);
+}
+
+function getYoutubeDownloadOptions() {
+  return [
+    "--no-playlist",
+    "-f",
+    "bestvideo*[height<=720]+bestaudio/best[height<=720]",
+    "-S",
+    "res:720",
+    "--merge-output-format",
+    "mp4",
+    "--ffmpeg-location",
+    path.dirname(ffmpegPath),
+    "--retries",
+    "10",
+    "--fragment-retries",
+    "10",
+    "--socket-timeout",
+    "15",
+  ];
 }
 
 function sanitizeTitle(title) {
@@ -25,30 +62,38 @@ function sanitizeTitle(title) {
     .trim() || "video";
 }
 
-// Get video info
+async function downloadVideoFile(videoUrl, outputPath) {
+  const binaryPath = helpers.findYtdlpBinary() || "yt-dlp";
+  const args = [videoUrl, ...getYoutubeDownloadOptions(), "--output", outputPath];
+  const result = await execFileAsync(binaryPath, args, { windowsHide: true });
+  if (result.stdout) console.log("[yt-dlp LOG]:\n" + result.stdout);
+  if (result.stderr) console.error("[yt-dlp ERR]:\n" + result.stderr);
+}
+
+// ---- STEP 1: Look up info about the video (title, thumbnail, etc.) ----
 app.get("/api/info", async (req, res) => {
   try {
     const videoUrl = req.query.url;
 
     if (!isYoutubeUrl(videoUrl)) {
-      return res.status(400).json({ error: "Invalid YouTube URL" });
+      return res.status(400).json({ error: "That doesn't look like a valid YouTube link." });
     }
 
-    const info = await play.video_basic_info(videoUrl);
-    
+    const info = await ytdlp.getInfoAsync(videoUrl);
+
     res.json({
-      title: info.video_details.title,
-      thumbnail: info.video_details.thumbnail[0]?.url || info.video_details.thumbnail,
-      lengthSeconds: info.video_details.durationInSec,
-      author: info.video_details.channel.name,
+      title: info.title,
+      thumbnail: info.thumbnail,
+      lengthSeconds: info.duration,
+      author: info.channel || info.uploader,
     });
   } catch (err) {
-    console.error("Info error:", err.message);
-    res.status(500).json({ error: "Couldn't fetch that video. Try a different one." });
+    console.error(err);
+    res.status(500).json({ error: "Couldn't fetch that video. It might be private, age-restricted, or removed." });
   }
 });
 
-// Download video
+// ---- STEP 2: Actually download the video and hand it to the browser ----
 app.get("/api/download", async (req, res) => {
   try {
     const videoUrl = req.query.url;
@@ -57,51 +102,54 @@ app.get("/api/download", async (req, res) => {
       return res.status(400).send("Invalid YouTube URL");
     }
 
-    const info = await play.video_basic_info(videoUrl);
-    const title = sanitizeTitle(info.video_details.title);
-    const downloadId = `${Date.now()}-${info.video_details.id}`;
-    const outputPath = path.join(DOWNLOAD_DIR, `${downloadId}.mp4`);
+    const info = await ytdlp.getInfoAsync(videoUrl);
+    const safeTitle = sanitizeTitle(info.title);
+    const downloadId = `${Date.now()}-${info.id}`;
+    const outputTemplate = path.join(DOWNLOAD_DIR, `${downloadId}.%(ext)s`);
 
-    // Get the best video stream
-    const stream = await play.stream(videoUrl);
+    await downloadVideoFile(videoUrl, outputTemplate);
 
-    const outputStream = fs.createWriteStream(outputPath);
+    const outputFile = fs.readdirSync(DOWNLOAD_DIR)
+      .filter((name) => name.startsWith(`${downloadId}.`))
+      .map((name) => path.join(DOWNLOAD_DIR, name))
+      .find((filePath) => fs.statSync(filePath).isFile());
 
-    stream.on("error", (err) => {
-      console.error("Stream error:", err);
-      fs.unlink(outputPath, () => {});
-      if (!res.headersSent) {
-        res.status(500).send("Download failed");
+    if (!outputFile) {
+      throw new Error("Downloaded file not found.");
+    }
+
+    res.download(outputFile, `${safeTitle}.mp4`, (err) => {
+      if (err && err.code !== "ECONNABORTED") {
+        console.error("Res download error:", err);
       }
-    });
 
-    outputStream.on("error", (err) => {
-      console.error("Write error:", err);
-      if (!res.headersSent) {
-        res.status(500).send("File write failed");
-      }
-    });
-
-    outputStream.on("finish", () => {
-      res.download(outputPath, `${title}.mp4`, (err) => {
-        if (err && err.code !== "ECONNABORTED") {
-          console.error("Download response error:", err);
+      fs.unlink(outputFile, (unlinkErr) => {
+        if (unlinkErr) {
+          console.error("Could not delete temp file:", unlinkErr);
         }
-        fs.unlink(outputPath, (unlinkErr) => {
-          if (unlinkErr) console.error("Cleanup error:", unlinkErr);
-        });
       });
     });
-
-    stream.pipe(outputStream);
   } catch (err) {
-    console.error("Download error:", err.message);
-    if (!res.headersSent) {
-      res.status(500).json({ error: err.message || "Download failed" });
-    }
+    console.error(err);
+    if (!res.headersSent) res.status(500).send("Download failed: " + err.message);
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
-});
+async function start() {
+  console.log("Checking setup...");
+
+  const installed = await ytdlp.checkInstallationAsync();
+  if (!installed) {
+    console.log("First run: downloading the yt-dlp engine (about 10-15 seconds, one time only)...");
+    await helpers.downloadYtDlp();
+    console.log("Done.");
+  } else {
+    console.log("yt-dlp is ready!");
+  }
+
+  app.listen(PORT, () => {
+    console.log(`✅ Server is running! Open http://localhost:${PORT} in your browser.`);
+  });
+}
+
+start();
