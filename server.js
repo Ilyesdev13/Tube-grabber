@@ -4,10 +4,27 @@ const path = require("path");
 const ytdl = require("ytdl-core");
 const ffmpegPath = require("ffmpeg-static");
 const { spawn } = require("child_process");
+const http = require("http");
+const https = require("https");
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 const DOWNLOAD_DIR = path.join(__dirname, "downloads");
+
+// Default request options with browser headers
+const defaultOptions = {
+  headers: {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+  },
+  agent: new http.Agent({ keepAlive: true }),
+  httpsAgent: new https.Agent({ keepAlive: true }),
+};
 
 if (!fs.existsSync(DOWNLOAD_DIR)) {
   fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
@@ -35,7 +52,7 @@ app.get("/api/info", async (req, res) => {
       return res.status(400).json({ error: "Invalid YouTube URL" });
     }
 
-    const info = await ytdl.getInfo(videoUrl);
+    const info = await ytdl.getInfo(videoUrl, defaultOptions);
     const videoDetails = info.videoDetails;
 
     res.json({
@@ -59,7 +76,7 @@ app.get("/api/download", async (req, res) => {
       return res.status(400).send("Invalid YouTube URL");
     }
 
-    const info = await ytdl.getInfo(videoUrl);
+    const info = await ytdl.getInfo(videoUrl, defaultOptions);
     const videoDetails = info.videoDetails;
     const safeTitle = sanitizeTitle(videoDetails.title);
     const downloadId = `${Date.now()}-${videoDetails.videoId}`;
@@ -76,8 +93,8 @@ app.get("/api/download", async (req, res) => {
     }
 
     // Merge video and audio with ffmpeg
-    const video = ytdl.downloadFromInfo(info, { format: videoStream });
-    const audio = ytdl.downloadFromInfo(info, { format: audioStream });
+    const video = ytdl.downloadFromInfo(info, { format: videoStream, ...defaultOptions });
+    const audio = ytdl.downloadFromInfo(info, { format: audioStream, ...defaultOptions });
 
     const ffmpeg = spawn(ffmpegPath, [
       "-i", "pipe:3",
