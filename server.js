@@ -34,7 +34,7 @@ app.get("/api/info", async (req, res) => {
       return res.status(400).json({ error: "Invalid YouTube URL" });
     }
 
-    const info = await play.video_info(videoUrl);
+    const info = await play.video_basic_info(videoUrl);
     
     res.json({
       title: info.video_details.title,
@@ -57,7 +57,7 @@ app.get("/api/download", async (req, res) => {
       return res.status(400).send("Invalid YouTube URL");
     }
 
-    const info = await play.video_info(videoUrl);
+    const info = await play.video_basic_info(videoUrl);
     const title = sanitizeTitle(info.video_details.title);
     const downloadId = `${Date.now()}-${info.video_details.id}`;
     const outputPath = path.join(DOWNLOAD_DIR, `${downloadId}.mp4`);
