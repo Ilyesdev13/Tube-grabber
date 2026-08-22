@@ -1,7 +1,7 @@
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const ytdl = require("@distube/ytdl");
+const play = require("play-dl");
 const ffmpegPath = require("ffmpeg-static");
 
 const app = express();
@@ -34,14 +34,13 @@ app.get("/api/info", async (req, res) => {
       return res.status(400).json({ error: "Invalid YouTube URL" });
     }
 
-    const info = await ytdl.getInfo(videoUrl);
-    const videoDetails = info.videoDetails;
-
+    const info = await play.video_info(videoUrl);
+    
     res.json({
-      title: videoDetails.title,
-      thumbnail: videoDetails.thumbnail.thumbnails[videoDetails.thumbnail.thumbnails.length - 1].url,
-      lengthSeconds: videoDetails.lengthSeconds,
-      author: videoDetails.author.name,
+      title: info.video_details.title,
+      thumbnail: info.video_details.thumbnail[0]?.url || info.video_details.thumbnail,
+      lengthSeconds: info.video_details.durationInSec,
+      author: info.video_details.channel.name,
     });
   } catch (err) {
     console.error("Info error:", err.message);
@@ -58,14 +57,13 @@ app.get("/api/download", async (req, res) => {
       return res.status(400).send("Invalid YouTube URL");
     }
 
-    const info = await ytdl.getInfo(videoUrl);
-    const videoDetails = info.videoDetails;
-    const safeTitle = sanitizeTitle(videoDetails.title);
-    const downloadId = `${Date.now()}-${videoDetails.videoId}`;
+    const info = await play.video_info(videoUrl);
+    const title = sanitizeTitle(info.video_details.title);
+    const downloadId = `${Date.now()}-${info.video_details.id}`;
     const outputPath = path.join(DOWNLOAD_DIR, `${downloadId}.mp4`);
 
-    // Get best quality (usually combined video+audio)
-    const stream = ytdl.downloadFromInfo(info, { quality: "18" });
+    // Get the best video stream
+    const stream = await play.stream(videoUrl);
 
     const outputStream = fs.createWriteStream(outputPath);
 
@@ -85,7 +83,7 @@ app.get("/api/download", async (req, res) => {
     });
 
     outputStream.on("finish", () => {
-      res.download(outputPath, `${safeTitle}.mp4`, (err) => {
+      res.download(outputPath, `${title}.mp4`, (err) => {
         if (err && err.code !== "ECONNABORTED") {
           console.error("Download response error:", err);
         }
