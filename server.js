@@ -1,14 +1,3 @@
-// ============================================
-// This is the "robot" that does the real work.
-// It runs on YOUR computer, not in the browser,
-// because YouTube only talks to real servers,
-// not directly to a webpage.
-//
-// Under the hood it drives yt-dlp, a tool kept
-// up to date by a huge community — so when
-// YouTube changes something, this keeps working
-// much more reliably than older libraries did.
-// ============================================
 
 const express = require("express");
 const fs = require("fs");
