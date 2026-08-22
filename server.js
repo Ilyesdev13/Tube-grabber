@@ -34,7 +34,7 @@ app.use(express.static(path.join(__dirname, "public")));
 function isYoutubeUrl(url) {
   return typeof url === "string" && /youtube\.com|youtu\.be/.test(url);
 }
-function getYoutubeDownloadOptions(includeBrowserCookies = true) {
+function getYoutubeDownloadOptions(includeBrowserCookies = false) {
   const browserCookieOptions = includeBrowserCookies
     ? ["--cookies-from-browser", process.env.YTDLP_BROWSER || "chrome"]
     : [];
