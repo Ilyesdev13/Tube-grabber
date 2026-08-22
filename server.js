@@ -1,30 +1,12 @@
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const ytdl = require("ytdl-core");
+const ytdl = require("@distube/ytdl");
 const ffmpegPath = require("ffmpeg-static");
-const { spawn } = require("child_process");
-const http = require("http");
-const https = require("https");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DOWNLOAD_DIR = path.join(__dirname, "downloads");
-
-// Default request options with browser headers
-const defaultOptions = {
-  headers: {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Accept-Encoding": "gzip, deflate",
-    "DNT": "1",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-  },
-  agent: new http.Agent({ keepAlive: true }),
-  httpsAgent: new https.Agent({ keepAlive: true }),
-};
 
 if (!fs.existsSync(DOWNLOAD_DIR)) {
   fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
@@ -52,7 +34,7 @@ app.get("/api/info", async (req, res) => {
       return res.status(400).json({ error: "Invalid YouTube URL" });
     }
 
-    const info = await ytdl.getInfo(videoUrl, defaultOptions);
+    const info = await ytdl.getInfo(videoUrl);
     const videoDetails = info.videoDetails;
 
     res.json({
@@ -62,8 +44,8 @@ app.get("/api/info", async (req, res) => {
       author: videoDetails.author.name,
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Couldn't fetch that video. Check if the URL is valid." });
+    console.error("Info error:", err.message);
+    res.status(500).json({ error: "Couldn't fetch that video. Try a different one." });
   }
 });
 
@@ -76,57 +58,49 @@ app.get("/api/download", async (req, res) => {
       return res.status(400).send("Invalid YouTube URL");
     }
 
-    const info = await ytdl.getInfo(videoUrl, defaultOptions);
+    const info = await ytdl.getInfo(videoUrl);
     const videoDetails = info.videoDetails;
     const safeTitle = sanitizeTitle(videoDetails.title);
     const downloadId = `${Date.now()}-${videoDetails.videoId}`;
     const outputPath = path.join(DOWNLOAD_DIR, `${downloadId}.mp4`);
 
-    // Get best video and audio streams
-    const formats = ytdl.filterFormats(info.formats, { quality: "highest" });
-    
-    const videoStream = formats.find(f => f.hasVideo && !f.hasAudio);
-    const audioStream = formats.find(f => f.hasAudio && !f.hasVideo);
+    // Get best quality (usually combined video+audio)
+    const stream = ytdl.downloadFromInfo(info, { quality: "18" });
 
-    if (!videoStream || !audioStream) {
-      return res.status(500).json({ error: "No suitable streams found" });
-    }
+    const outputStream = fs.createWriteStream(outputPath);
 
-    // Merge video and audio with ffmpeg
-    const video = ytdl.downloadFromInfo(info, { format: videoStream, ...defaultOptions });
-    const audio = ytdl.downloadFromInfo(info, { format: audioStream, ...defaultOptions });
-
-    const ffmpeg = spawn(ffmpegPath, [
-      "-i", "pipe:3",
-      "-i", "pipe:4",
-      "-c:v", "copy",
-      "-c:a", "aac",
-      "-map", "0:v:0",
-      "-map", "1:a:0",
-      outputPath,
-    ], {
-      stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
+    stream.on("error", (err) => {
+      console.error("Stream error:", err);
+      fs.unlink(outputPath, () => {});
+      if (!res.headersSent) {
+        res.status(500).send("Download failed");
+      }
     });
 
-    video.pipe(ffmpeg.stdio[3]);
-    audio.pipe(ffmpeg.stdio[4]);
+    outputStream.on("error", (err) => {
+      console.error("Write error:", err);
+      if (!res.headersSent) {
+        res.status(500).send("File write failed");
+      }
+    });
 
-    ffmpeg.on("close", () => {
+    outputStream.on("finish", () => {
       res.download(outputPath, `${safeTitle}.mp4`, (err) => {
         if (err && err.code !== "ECONNABORTED") {
-          console.error("Download error:", err);
+          console.error("Download response error:", err);
         }
-        fs.unlink(outputPath, () => {});
+        fs.unlink(outputPath, (unlinkErr) => {
+          if (unlinkErr) console.error("Cleanup error:", unlinkErr);
+        });
       });
     });
 
-    ffmpeg.on("error", (err) => {
-      console.error("FFmpeg error:", err);
-      res.status(500).send("Encoding failed");
-    });
+    stream.pipe(outputStream);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    console.error("Download error:", err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message || "Download failed" });
+    }
   }
 });
 
